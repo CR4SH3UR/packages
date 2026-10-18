@@ -59,7 +59,10 @@ export const BUILTIN_AGENT_DESCRIPTORS: Record<AgentId, AgentDescriptor> = {
 		},
 		spawn: {
 			command: "opencode",
-			args: ["acp"],
+			// `--print-logs` before `acp` keeps private-server logs on stderr so
+			// stdout stays ACP-only. Log lines on stdout kill the child and the
+			// next stdin write surfaces as `write EPIPE`.
+			args: ["--print-logs", "acp"],
 		},
 	},
 	fx: {

@@ -170,3 +170,14 @@ export function streamFile(
 export async function waitFor(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/** True for a write to a pipe whose reader has already gone away. */
+export function isBrokenPipeError(err: unknown): boolean {
+	if (!err || typeof err !== "object") return false;
+	const code = "code" in err ? err.code : undefined;
+	return (
+		code === "EPIPE" ||
+		code === "ERR_STREAM_DESTROYED" ||
+		code === "ERR_STREAM_WRITE_AFTER_END"
+	);
+}
