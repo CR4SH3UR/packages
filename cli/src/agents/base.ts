@@ -14,7 +14,7 @@ import {
 } from "@shellular/protocol";
 import { config } from "@/config";
 import { logger } from "@/logger";
-import { commandExists } from "@/utils";
+import { commandExists, isBrokenPipeError } from "@/utils";
 import {
 	AcpClient,
 	type ElicitationListener,
@@ -80,6 +80,58 @@ export interface SpawnedAgent {
 	process: ChildProcessWithoutNullStreams;
 	/** The ndjson stream used to exchange ACP messages with the agent. */
 	stream: acp.Stream;
+}
+
+function isProcessAlive(child: ChildProcessWithoutNullStreams | undefined) {
+	return Boolean(child && child.exitCode === null && child.signalCode === null);
+}
+
+/**
+ * Child stdin/stdout 'error' must have a listener: a write after the peer
+ * closes the pipe raises EPIPE, and an unhandled stream error becomes an
+ * uncaught exception (`write EPIPE`) that takes down the host.
+ */
+function ignoreBrokenPipe(stream: NodeJS.EventEmitter, label: string) {
+	stream.on("error", (err: Error) => {
+		if (isBrokenPipeError(err)) return;
+		logger.warn(label, err);
+	});
+}
+
+function writableIgnoringBrokenPipe(
+	output: WritableStream<Uint8Array>,
+	agentName: string,
+): WritableStream<Uint8Array> {
+	return new WritableStream<Uint8Array>({
+		async write(chunk) {
+			const writer = output.getWriter();
+			try {
+				await writer.write(chunk);
+			} catch (err) {
+				if (isBrokenPipeError(err)) {
+					throw new AgentUnavailableError(
+						agentName,
+						"agent process closed stdin (write EPIPE)",
+					);
+				}
+				throw err;
+			} finally {
+				writer.releaseLock();
+			}
+		},
+		close() {
+			return output.close().catch((err) => {
+				if (isBrokenPipeError(err)) return;
+				throw err;
+			});
+		},
+		abort(reason) {
+			return output.abort(reason).catch((err) => {
+				if (isBrokenPipeError(err)) return;
+				throw err;
+			});
+		},
+	});
 }
 
 interface LoadSessionFallback {
@@ -191,8 +243,12 @@ export class ACP {
 	}
 
 	async init(): Promise<acp.InitializeResponse> {
-		if (this.state === "ready" && this.initResult) {
+		if (this.state === "ready" && this.initResult && this.isProcessAlive()) {
 			return this.initResult;
+		}
+
+		if (this.spawnedAgent && !this.isProcessAlive()) {
+			this.cleanupDeadProcess();
 		}
 
 		if (!this.isCommandAvailable()) {
@@ -296,7 +352,19 @@ export class ACP {
 			},
 		);
 
-		const input = Writable.toWeb(agentProcess.stdin);
+		ignoreBrokenPipe(
+			agentProcess.stdin,
+			`ACP agent ${config.name} stdin error`,
+		);
+		ignoreBrokenPipe(
+			agentProcess.stdout,
+			`ACP agent ${config.name} stdout error`,
+		);
+
+		const input = writableIgnoringBrokenPipe(
+			Writable.toWeb(agentProcess.stdin),
+			config.name,
+		);
 		const output = Readable.toWeb(
 			agentProcess.stdout,
 		) as ReadableStream<Uint8Array>;
@@ -791,10 +859,13 @@ export class ACP {
 	}
 
 	destroy() {
-		this.connection?.close();
+		this.closeConnectionQuietly();
 		if (this.spawnedAgent) {
-			this.spawnedAgent.process.kill();
+			const child = this.spawnedAgent.process;
 			this.spawnedAgent = null;
+			if (isProcessAlive(child)) {
+				child.kill();
+			}
 		}
 		this.connection = null;
 		this.initResult = null;
@@ -933,10 +1004,34 @@ export class ACP {
 
 	/** Context for calling agent-side ACP methods on the live connection. */
 	private agent(): acp.ClientContext {
-		if (!this.connection) {
-			throw new AgentUnavailableError(this.id, "connection is not initialized");
+		if (!this.connection || !this.isProcessAlive()) {
+			throw new AgentUnavailableError(
+				this.id,
+				this.stateError ?? "connection is not initialized",
+			);
 		}
 		return this.connection.agent;
+	}
+
+	private isProcessAlive() {
+		return isProcessAlive(this.spawnedAgent?.process);
+	}
+
+	private closeConnectionQuietly() {
+		try {
+			this.connection?.close();
+		} catch (err) {
+			if (!isBrokenPipeError(err)) {
+				logger.warn(`ACP agent ${this.id} connection close error`, err);
+			}
+		}
+	}
+
+	private cleanupDeadProcess() {
+		this.closeConnectionQuietly();
+		this.connection = null;
+		this.spawnedAgent = null;
+		this.initResult = null;
 	}
 
 	private errorMessage(err: unknown) {
@@ -978,7 +1073,10 @@ export class ACP {
 
 	protected spawnAgent() {
 		if (this.spawnedAgent) {
-			throw new Error("Agent process already spawned");
+			if (this.isProcessAlive()) {
+				throw new Error("Agent process already spawned");
+			}
+			this.cleanupDeadProcess();
 		}
 
 		const extraEnv = this.spawnEnvOverride();
@@ -1014,6 +1112,7 @@ export class ACP {
 						? undefined
 						: `Agent exited with code ${code ?? "null"} signal ${signal ?? "null"}`;
 			}
+			this.closeConnectionQuietly();
 		});
 
 		return {

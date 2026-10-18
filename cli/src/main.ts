@@ -64,6 +64,7 @@ import {
 	readAllowedUsers,
 	removeAllowedUser,
 } from "@/users";
+import { isBrokenPipeError } from "@/utils";
 import { updateAndStartShellular } from "./update-and-start";
 
 ensureConfig();
@@ -601,12 +602,16 @@ async function runCli({
 	process.on("beforeExit", cleanup);
 
 	process.on("uncaughtException", (err) => {
+		// Native async writes to a closed agent pipe arrive with no JS frames.
+		// They are peer disconnects, not host bugs — do not treat them as fatal.
+		if (isBrokenPipeError(err)) return;
 		logger.error("uncaughtException", err);
 		// cleanup();
 		// process.exit(1);
 	});
 
 	process.on("unhandledRejection", (err) => {
+		if (isBrokenPipeError(err)) return;
 		logger.error("unhandledRejection", err);
 		// cleanup();
 		// process.exit(1);

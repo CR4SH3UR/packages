@@ -38,7 +38,6 @@
     "@agentclientprotocol/sdk": "^1.4.0",
     "@ff-labs/fff-node": "^0.10.5",
     "@inquirer/prompts": "^8.4.2",
-    "@opencode-ai/sdk": "1.18.18",
     "@shellular/protocol": "workspace:*",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
