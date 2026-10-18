@@ -91,6 +91,12 @@ function isProcessAlive(child: ChildProcessWithoutNullStreams | undefined) {
  * closes the pipe raises EPIPE, and an unhandled stream error becomes an
  * uncaught exception (`write EPIPE`) that takes down the host.
  */
+function isDeadAgentWriteError(err: unknown): boolean {
+	if (isBrokenPipeError(err)) return true;
+	if (!err || typeof err !== "object") return false;
+	return "name" in err && err.name === "AbortError";
+}
+
 function ignoreBrokenPipe(stream: NodeJS.EventEmitter, label: string) {
 	stream.on("error", (err: Error) => {
 		if (isBrokenPipeError(err)) return;
@@ -108,7 +114,7 @@ function writableIgnoringBrokenPipe(
 			try {
 				await writer.write(chunk);
 			} catch (err) {
-				if (isBrokenPipeError(err)) {
+				if (isDeadAgentWriteError(err)) {
 					throw new AgentUnavailableError(
 						agentName,
 						"agent process closed stdin (write EPIPE)",
@@ -121,13 +127,13 @@ function writableIgnoringBrokenPipe(
 		},
 		close() {
 			return output.close().catch((err) => {
-				if (isBrokenPipeError(err)) return;
+				if (isDeadAgentWriteError(err)) return;
 				throw err;
 			});
 		},
 		abort(reason) {
 			return output.abort(reason).catch((err) => {
-				if (isBrokenPipeError(err)) return;
+				if (isDeadAgentWriteError(err)) return;
 				throw err;
 			});
 		},

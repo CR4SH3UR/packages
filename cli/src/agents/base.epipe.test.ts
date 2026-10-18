@@ -37,3 +37,33 @@ test("writing to a dead agent stdin becomes AgentUnavailableError, not uncaught 
 		},
 	);
 });
+
+test("stdin EPIPE after the child closes the pipe is not uncaught", async () => {
+	const spawned = ACP.spawnAgentProcess({
+		name: "epipe-close-test",
+		command: process.execPath,
+		args: ["-e", "process.stdin.resume(); process.stdin.destroy()"],
+	});
+
+	await Promise.race([
+		new Promise<void>((resolve) => {
+			spawned.process.stdin.once("error", () => resolve());
+			spawned.process.once("exit", () => resolve());
+		}),
+		new Promise<void>((resolve) => setTimeout(resolve, 250)),
+	]);
+
+	const writer = spawned.stream.writable.getWriter();
+	await assert.rejects(
+		() =>
+			writer.write({
+				jsonrpc: "2.0",
+				method: "initialize",
+				id: 2,
+				params: {},
+			}),
+		AgentUnavailableError,
+	);
+
+	spawned.process.kill();
+});
